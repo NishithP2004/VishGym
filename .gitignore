@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+.env
+.streamlit/secrets.toml
+artifacts/runtime/
+artifacts/training/*.bin
+artifacts/training/*.safetensors
+*.wav
+*.egg-info/
+docx-qa/

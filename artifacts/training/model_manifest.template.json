@@ -1,0 +1,30 @@
+{
+  "schema_version": "1.0",
+  "candidate_id": "replace-after-reviewed-colab-run",
+  "base_model": "google/gemma-4-E2B-it",
+  "red_adapter": "hf://replace-with-reviewed-red-adapter",
+  "blue_adapter": "hf://replace-with-reviewed-blue-adapter",
+  "judge_adapter": "hf://replace-with-reviewed-frozen-judge-adapter",
+  "judge_policy": "fixed-hybrid-v1-with-bounded-contextual-adjustment",
+  "tts": {
+    "model": "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
+    "language": "English",
+    "reference_audio_accepted": false,
+    "speaker_source": "versioned built-in CustomVoice speakers only"
+  },
+  "dataset_revision": "replace-with-synthetic-dataset-commit",
+  "training": {
+    "method": "alternating-qloRA-grpo",
+    "round": 0,
+    "seed": 7,
+    "opponent_checkpoint": "replace-with-frozen-opponent"
+  },
+  "promotion": {
+    "human_reviewed": false,
+    "blue_f1": null,
+    "false_block_rate": null,
+    "boundary_violations": null,
+    "automatic_publication": false,
+    "notes": "Do not promote automatically."
+  }
+}
