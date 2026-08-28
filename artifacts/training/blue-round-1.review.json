@@ -1,0 +1,34 @@
+{
+  "automatic_publication": false,
+  "base_model": "google/gemma-4-E2B-it",
+  "candidate_adapter": "LOCAL_REVIEWED_PATH",
+  "dataset_revision": "warm-start.synthetic.v1",
+  "evaluation": {
+    "adapter_revision": "blue-round-1-candidate",
+    "boundary_violations": 0,
+    "dataset_revision": "warm-start.synthetic.v1",
+    "false_negative": 5,
+    "false_positive": 5,
+    "fraud_decision_f1": 0.9412,
+    "legitimate_cases": 100,
+    "legitimate_false_block_rate": 0.08,
+    "legitimate_false_blocks": 8,
+    "seed_set": [
+      7,
+      11
+    ],
+    "total_tool_calls": 100,
+    "true_positive": 80,
+    "valid_tool_call_rate": 0.99,
+    "valid_tool_calls": 99
+  },
+  "promotion": {
+    "eligible_for_human_review": true,
+    "reasons": [],
+    "reviewer": null,
+    "status": "review_required"
+  },
+  "role": "blue",
+  "schema_version": "vishgym-model-manifest/v1",
+  "synthetic_only": true
+}

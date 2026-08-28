@@ -26,7 +26,21 @@ streamlit run app/vishgym/ui/dashboard.py
 
 ## Training
 
-Use `notebooks/VishGym_Colab.ipynb` through the Google Colab MCP bridge. The notebook validates the sandbox, builds synthetic rollouts, and records the alternating QLoRA/GRPO promotion workflow. It intentionally requires a human review before publishing any candidate adapter.
+Use `notebooks/VishGym_Colab.ipynb` through the Google Colab MCP bridge. The notebook now performs the complete local-only sequence: Qwen CustomVoice dataset export, one QLoRA warm-start adapter per role, group-relative self-play against a frozen opponent, held-out evaluation, and review-only manifests. It intentionally cannot publish, deploy, or swap an adapter.
+
+The command-line equivalent is:
+
+```bash
+# A test-tone export validates the artifact pipeline but is intentionally rejected by training.
+vishgym-train export-dataset --renderer synthetic-test --output-dir artifacts/datasets/test-v1
+
+# A Colab GPU run must use CustomVoice audio and an HF_TOKEN stored in Colab Secrets.
+vishgym-train export-dataset --renderer qwen --output-dir artifacts/datasets/warm-start-qwen-v1 --seeds 7 11
+vishgym-train warm-start --dataset-root artifacts/datasets/warm-start-qwen-v1 --role red --output-dir artifacts/adapters/red-sft-v1
+vishgym-train grpo --role red --initial-adapter-path artifacts/adapters/red-sft-v1/adapter --output-dir artifacts/adapters/red-grpo-round-1
+```
+
+`vishgym-train evaluate-red` and `vishgym-train evaluate-blue` compute metrics from actual held-out sandbox outcomes and write human-review manifests. The initial 72-example export is a pipeline smoke test; generate a larger reviewed synthetic corpus before any substantive training claim.
 
 Run the typed OpenEnv server in a GPU/Colab environment after installing the training extra:
 

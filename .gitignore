@@ -5,6 +5,9 @@ __pycache__/
 .env
 .streamlit/secrets.toml
 artifacts/runtime/
+artifacts/adapters/
+artifacts/evaluations/
+artifacts/datasets/*/audio/
 artifacts/training/*.bin
 artifacts/training/*.safetensors
 *.wav

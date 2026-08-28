@@ -22,6 +22,7 @@ dev = ["pytest>=8.3", "httpx>=0.27"]
 
 [project.scripts]
 vishgym-demo = "vishgym.cli:main"
+vishgym-train = "vishgym.training.cli:main"
 
 [tool.setuptools]
 package-dir = {"" = "app"}
