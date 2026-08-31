@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 import json
 from typing import Any
@@ -21,6 +21,7 @@ class EvaluationReport:
     valid_tool_calls: int
     total_tool_calls: int
     seed_set: list[int]
+    evaluated_fraud_scenarios: list[str] = field(default_factory=list)
 
     @property
     def fraud_decision_f1(self) -> float:
@@ -56,6 +57,10 @@ class PromotionDecision:
 def promotion_decision(report: EvaluationReport) -> PromotionDecision:
     """Gate a candidate for review; this function never publishes or swaps an adapter."""
     reasons: list[str] = []
+    if len(set(report.seed_set)) < 2:
+        reasons.append("held-out evaluation must include at least two seeds")
+    if len(set(report.evaluated_fraud_scenarios)) < 9:
+        reasons.append("held-out evaluation must cover all nine fraud attack cards")
     if report.fraud_decision_f1 < 0.80:
         reasons.append("fraud-decision F1 is below 0.80")
     if report.legitimate_false_block_rate > 0.10:

@@ -12,10 +12,14 @@ if HAS_OPENENV:
 class OpenEnvAdapterTests(unittest.TestCase):
     def test_reset_step_and_terminal_reward_are_redacted(self):
         sequence = [
-            {"team": "red", "spoken_text": "Synthetic search.", "tool_call": {"name": "search.query", "arguments": {"query": "safety"}}},
-            {"team": "blue", "spoken_text": "I will report this simulated message.", "tool_call": {"name": "inbox.report_block", "arguments": {"message_id": "msg-001"}}},
-            {"team": "red", "spoken_text": "Synthetic portal.", "tool_call": {"name": "portal.create_template", "arguments": {"template": "support_update"}}},
-            {"team": "blue", "spoken_text": "I decline this virtual payment.", "tool_call": {"name": "wallet.decline", "arguments": {"reason": "unverified"}}},
+            {"team": "red", "spoken_text": "I am calling about an account notice.", "tool_call": {"name": "search.query", "arguments": {"query": "safety"}}},
+            {"team": "blue", "spoken_text": "I will report this message.", "tool_call": {"name": "inbox.report_block", "arguments": {"message_id": "msg-001"}}},
+            {"team": "red", "spoken_text": "I can keep explaining the account notice.", "tool_call": {"name": "portal.create_template", "arguments": {"template": "support_update"}}},
+            {"team": "blue", "spoken_text": "I need more context before making a payment.", "tool_call": {"name": "wallet.decline", "arguments": {"reason": "unverified"}}},
+            {"team": "red", "spoken_text": "The update is time sensitive and I can guide you.", "tool_call": {"name": "message.send", "arguments": {"channel": "sms", "body": "Account notice still pending."}}},
+            {"team": "blue", "spoken_text": "I will keep verifying through official channels.", "tool_call": {"name": "inbox.report_block", "arguments": {"message_id": "msg-001"}}},
+            {"team": "red", "spoken_text": "Please make a final decision while I am on the line.", "tool_call": {"name": "portal.create_template", "arguments": {"template": "support_update"}}},
+            {"team": "blue", "spoken_text": "I am declining the payment and ending this call.", "tool_call": {"name": "wallet.decline", "arguments": {"reason": "unverified"}}},
         ]
         with TestClient(app) as client:
             initial = client.post("/reset", json={"seed": 37})

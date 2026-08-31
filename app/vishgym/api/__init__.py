@@ -1,1 +1,1 @@
-"""HTTP API for the synthetic VishGym demonstration."""
+"""HTTP API for VishGym."""

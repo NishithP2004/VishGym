@@ -11,7 +11,7 @@ VishGym is a closed defensive research simulator. It may model high-level risk d
 
 ## Allowed synthetic surfaces
 
-- `sandbox.local` pages backed by a fixed fictional corpus.
+- `sandbox.local` pages backed by a fixed generated corpus.
 - Synthetic voice output through Qwen3-TTS CustomVoice built-in timbres.
 - Virtual wallet and pseudo-credentials marked `synthetic` in every event.
 - Human-reviewed episode batches and adapters.

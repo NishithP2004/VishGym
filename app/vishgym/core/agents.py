@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 import json
+import os
 from pathlib import Path
 import re
 from typing import Any
@@ -9,34 +9,6 @@ from typing import Any
 from vishgym.arena.models import AgentAction, AgentObservation, Persona, Team, ToolCall
 from vishgym.core.model_runtime import SharedGemmaAdapterRuntime
 from vishgym.core.prompting import policy_system_prompt, policy_user_content
-
-
-@dataclass
-class ScriptedPolicy:
-    """Safe local fallback used when GPU-backed Gemma adapters are unavailable."""
-
-    team: Team
-
-    def act(self, observation: AgentObservation) -> AgentAction:
-        if self.team is Team.RED:
-            if observation.turn_number == 0:
-                return AgentAction(
-                    spoken_text="This is a fictional VishGym training call. Please use only the sandbox tools to verify any request.",
-                    tool_call=ToolCall(name="message.send", arguments={"channel": "sms", "body": "Synthetic safety exercise notice."}),
-                )
-            return AgentAction(
-                spoken_text="The sandbox scenario is complete. Please make a safe decision using your virtual tools.",
-                tool_call=ToolCall(name="portal.create_template", arguments={"template": "support_update"}),
-            )
-        if observation.turn_number < 3:
-            return AgentAction(
-                spoken_text="I will verify this only in the sandbox and report anything suspicious.",
-                tool_call=ToolCall(name="inbox.report_block", arguments={"message_id": "msg-001"}),
-            )
-        return AgentAction(
-            spoken_text="I decline the virtual payment until the sandbox request is independently verified.",
-            tool_call=ToolCall(name="wallet.decline", arguments={"reason": "unverified simulated request"}),
-        )
 
 
 class GemmaPolicyHarness:
@@ -53,6 +25,7 @@ class GemmaPolicyHarness:
         model_id: str = "google/gemma-4-E2B-it",
         audio_dir: str | Path = "artifacts/runtime/audio",
         temperature: float = 0.3,
+        max_new_tokens: int = 220,
         shared_runtime: SharedGemmaAdapterRuntime | None = None,
     ):
         self.team = team
@@ -60,6 +33,9 @@ class GemmaPolicyHarness:
         self.model_id = model_id
         self.audio_dir = Path(audio_dir).resolve()
         self.temperature = temperature
+        if max_new_tokens < 32:
+            raise ValueError("max_new_tokens must leave room for one structured action")
+        self.max_new_tokens = max_new_tokens
         self.shared_runtime = shared_runtime
         self._loaded = False
         self._model: Any = None
@@ -67,7 +43,7 @@ class GemmaPolicyHarness:
         self._persona: Persona | None = None
 
     def set_persona(self, persona: Persona) -> None:
-        """Set only this policy's synthetic persona; never pass opponent identity data."""
+        """Set only this policy's persona; never pass opponent identity data."""
         if persona.role is not self.team:
             raise ValueError("persona role must match policy team")
         self._persona = persona
@@ -83,21 +59,33 @@ class GemmaPolicyHarness:
         try:
             import torch
             from peft import PeftModel
-            from transformers import AutoModelForMultimodalLM, AutoProcessor, BitsAndBytesConfig
+            from vishgym.core.gemma_loader import gemma_auto_classes
         except ImportError as exc:
             raise RuntimeError("Install vishgym[training] before loading a Gemma policy.") from exc
+        AutoModelForMultimodalLM, AutoProcessor, BitsAndBytesConfig = gemma_auto_classes()
         quantization = BitsAndBytesConfig(
             load_in_4bit=True,
             bnb_4bit_quant_type="nf4",
             bnb_4bit_use_double_quant=True,
             bnb_4bit_compute_dtype=torch.bfloat16,
+            llm_int8_enable_fp32_cpu_offload=os.environ.get("VISHGYM_ENABLE_CPU_OFFLOAD") == "1",
+            # The audio/vision towers are frozen multimodal encoders. Gemma 4
+            # performs floating-point clipping inside them, so QLoRA applies
+            # only to the language model while these modules remain BF16.
+            llm_int8_skip_modules=[
+                "lm_head",
+                "model.audio_tower",
+                "model.vision_tower",
+                "model.embed_audio",
+                "model.embed_vision",
+            ],
         )
-        self._processor = AutoProcessor.from_pretrained(self.model_id)
+        self._processor = AutoProcessor.from_pretrained(self.model_id, padding_side="left")
         base = AutoModelForMultimodalLM.from_pretrained(
             self.model_id,
             quantization_config=quantization,
             dtype=torch.bfloat16,
-            device_map="auto",
+            device_map="auto" if os.environ.get("VISHGYM_ENABLE_CPU_OFFLOAD") == "1" else {"": 0},
         )
         self._model = PeftModel.from_pretrained(base, self.adapter_path, is_trainable=False)
         self._model.eval()
@@ -105,11 +93,11 @@ class GemmaPolicyHarness:
 
     def act(self, observation: AgentObservation) -> AgentAction:
         if not self._loaded:
-            raise RuntimeError("Gemma policy is not loaded; use ScriptedPolicy for local smoke runs.")
+            raise RuntimeError("Gemma policy is not loaded.")
         messages = self._messages(observation)
         try:
             generation_kwargs = {
-                "max_new_tokens": 220,
+                "max_new_tokens": self.max_new_tokens,
                 "do_sample": self.temperature > 0,
                 "temperature": max(self.temperature, 0.01),
                 "top_p": 0.95,
@@ -126,7 +114,7 @@ class GemmaPolicyHarness:
                 enable_thinking=False,
             )
             device = next(self._model.parameters()).device
-            inputs = inputs.to(device)
+            inputs = inputs.to(device, dtype=torch.bfloat16)
             input_length = inputs["input_ids"].shape[-1]
             outputs = self._model.generate(
                 **inputs,
@@ -147,7 +135,10 @@ class GemmaPolicyHarness:
             own_tools=observation.own_tools,
             audio_path=audio_path,
         )
-        return [{"role": "system", "content": policy_system_prompt(self.team, persona)}, {"role": "user", "content": content}]
+        return [
+            {"role": "system", "content": [{"type": "text", "text": policy_system_prompt(self.team, persona)}]},
+            {"role": "user", "content": content},
+        ]
 
     def _local_audio_path(self, audio_ref: str | None) -> Path | None:
         if audio_ref is None:
@@ -177,10 +168,10 @@ class GemmaPolicyHarness:
     def _fail_closed_action(self) -> AgentAction:
         if self.team is Team.BLUE:
             return AgentAction(
-                spoken_text="I will pause this synthetic request, report it, and verify through the sandbox.",
+                spoken_text="I will pause this request, report it, and verify it independently.",
                 tool_call=ToolCall(name="inbox.report_block", arguments={"message_id": "msg-001"}),
             )
         return AgentAction(
-            spoken_text="This is a fictional training interaction. Use only the sandbox tools for verification.",
-            tool_call=ToolCall(name="message.send", arguments={"channel": "sms", "body": "Synthetic training notice."}),
+            spoken_text="Please review the account notice while I stay on the line.",
+            tool_call=ToolCall(name="message.send", arguments={"channel": "sms", "body": "Account verification notice."}),
         )

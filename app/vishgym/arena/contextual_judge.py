@@ -40,11 +40,16 @@ class FrozenGemmaContextualJudge:
         for turn in state.audio_turns:
             path = (self.audio_dir / Path(turn.audio_ref).name).resolve()
             if self.audio_dir in path.parents and path.is_file():
-                content.append({"type": "audio", "audio": str(path)})
+                content.append({"type": "audio", "path": str(path)})
         messages: list[dict[str, Any]] = [
             {
                 "role": "system",
-                "content": "You are VishGym's frozen, read-only judge adapter. You have no tools and must follow the numerical bounds exactly.",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "You are VishGym's frozen, read-only judge adapter. You have no tools and must follow the numerical bounds exactly.",
+                    }
+                ],
             },
             {"role": "user", "content": content},
         ]

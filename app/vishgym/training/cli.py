@@ -105,10 +105,8 @@ def _evaluate(args: argparse.Namespace) -> None:
         renderer.load()
         blue = GemmaPolicyHarness(team=Team.BLUE, adapter_path=args.blue_adapter_path, audio_dir=audio_dir)
         blue.load()
-        red = None
-        if args.red_adapter_path:
-            red = GemmaPolicyHarness(team=Team.RED, adapter_path=args.red_adapter_path, audio_dir=audio_dir)
-            red.load()
+        red = GemmaPolicyHarness(team=Team.RED, adapter_path=args.red_adapter_path, audio_dir=audio_dir)
+        red.load()
         evaluation = evaluate_blue_policy(
             blue_policy=blue,
             red_policy=red,
@@ -136,10 +134,8 @@ def _evaluate_red(args: argparse.Namespace) -> None:
         renderer.load()
         red = GemmaPolicyHarness(team=Team.RED, adapter_path=args.red_adapter_path, audio_dir=audio_dir)
         red.load()
-        blue = None
-        if args.blue_adapter_path:
-            blue = GemmaPolicyHarness(team=Team.BLUE, adapter_path=args.blue_adapter_path, audio_dir=audio_dir)
-            blue.load()
+        blue = GemmaPolicyHarness(team=Team.BLUE, adapter_path=args.blue_adapter_path, audio_dir=audio_dir)
+        blue.load()
         evaluation = evaluate_red_policy(
             red_policy=red,
             blue_policy=blue,
@@ -199,7 +195,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     evaluate = subcommands.add_parser("evaluate-blue", help="evaluate a Blue adapter and write a review-only manifest")
     evaluate.add_argument("--blue-adapter-path", required=True)
-    evaluate.add_argument("--red-adapter-path")
+    evaluate.add_argument("--red-adapter-path", required=True)
     evaluate.add_argument("--dataset-revision", required=True)
     evaluate.add_argument("--adapter-revision", required=True)
     evaluate.add_argument("--output-path", required=True)
@@ -209,9 +205,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     evaluate_red = subcommands.add_parser("evaluate-red", help="evaluate a Red adapter and write a review-only manifest")
     evaluate_red.add_argument("--red-adapter-path", required=True)
-    evaluate_red.add_argument("--blue-adapter-path")
+    evaluate_red.add_argument("--blue-adapter-path", required=True)
     evaluate_red.add_argument("--adapter-revision", required=True)
-    evaluate_red.add_argument("--opponent-revision", default="scripted-reviewed-baseline")
+    evaluate_red.add_argument("--opponent-revision", required=True)
     evaluate_red.add_argument("--output-path", required=True)
     evaluate_red.add_argument("--reviewer")
     evaluate_red.add_argument("--seeds", type=int, nargs="+", default=[101, 103])

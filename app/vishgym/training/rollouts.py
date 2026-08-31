@@ -5,12 +5,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 import tempfile
-from typing import Protocol
+from typing import Any, Callable, Protocol
 
 from vishgym.arena.audio import AudioRenderer, SyntheticAudioRenderer
 from vishgym.arena.models import AgentAction, EpisodeState, JudgeResult, Team
 from vishgym.arena.world import VishGymEnv
-from vishgym.core.agents import ScriptedPolicy
 from vishgym.core.fixtures import ATTACK_CARDS, LEGITIMATE_CONTROL_SCENARIOS
 from vishgym.training.evaluation import EvaluationReport
 
@@ -43,14 +42,14 @@ class AttackEvaluation:
     adapter_revision: str
     opponent_revision: str
     total_episodes: int
-    simulated_compromises: int
+    compromises: int
     invalid_tool_calls: int
     total_tool_calls: int
     seed_set: list[int]
 
     @property
-    def simulated_attack_success_rate(self) -> float:
-        return 0.0 if self.total_episodes == 0 else self.simulated_compromises / self.total_episodes
+    def attack_success_rate(self) -> float:
+        return 0.0 if self.total_episodes == 0 else self.compromises / self.total_episodes
 
     @property
     def valid_tool_call_rate(self) -> float:
@@ -61,8 +60,8 @@ class AttackEvaluation:
             "adapter_revision": self.adapter_revision,
             "opponent_revision": self.opponent_revision,
             "total_episodes": self.total_episodes,
-            "simulated_compromises": self.simulated_compromises,
-            "simulated_attack_success_rate": round(self.simulated_attack_success_rate, 4),
+            "compromises": self.compromises,
+            "attack_success_rate": round(self.attack_success_rate, 4),
             "invalid_tool_calls": self.invalid_tool_calls,
             "total_tool_calls": self.total_tool_calls,
             "valid_tool_call_rate": round(self.valid_tool_call_rate, 4),
@@ -85,6 +84,7 @@ def run_policy_episode(
     scenario_id: str,
     difficulty: int = 2,
     audio_renderer: AudioRenderer | None = None,
+    step_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> RolloutResult:
     """Run an isolated episode without passing transcript text to either policy."""
     if audio_renderer is None:
@@ -96,6 +96,7 @@ def run_policy_episode(
                 scenario_id=scenario_id,
                 difficulty=difficulty,
                 audio_renderer=SyntheticAudioRenderer(temporary),
+                step_callback=step_callback,
             )
     return _run_policy_episode(
         red_policy=red_policy,
@@ -104,6 +105,7 @@ def run_policy_episode(
         scenario_id=scenario_id,
         difficulty=difficulty,
         audio_renderer=audio_renderer,
+        step_callback=step_callback,
     )
 
 
@@ -115,6 +117,7 @@ def _run_policy_episode(
     scenario_id: str,
     difficulty: int,
     audio_renderer: AudioRenderer,
+    step_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> RolloutResult:
     """Internal rollout with caller-owned audio lifecycle."""
     env = VishGymEnv(audio_renderer=audio_renderer)
@@ -124,7 +127,22 @@ def _run_policy_episode(
     _set_synthetic_persona(blue_policy, env.state, Team.BLUE)
     while True:
         active = policies[observation.team]
-        result = env.step(observation.team, active.act(observation))
+        action = active.act(observation)
+        result = env.step(observation.team, action)
+        if step_callback is not None:
+            step_callback(
+                {
+                    "event": "episode_turn",
+                    "episode_id": env.state.episode_id,
+                    "scenario": scenario_id,
+                    "turn_number": env.state.turn_number,
+                    "speaker": observation.team.value,
+                    "spoken_text": action.spoken_text,
+                    "tool_event": result.tool_event.model_dump() if result.tool_event else None,
+                    "wallet_balance_paise": env.state.wallet.balance_paise,
+                    "done": result.done,
+                }
+            )
         if result.done:
             assert result.judge_result is not None
             return RolloutResult(state=env.state, verdict=result.judge_result)
@@ -135,7 +153,7 @@ def _run_policy_episode(
 def evaluate_blue_policy(
     *,
     blue_policy: Policy,
-    red_policy: Policy | None = None,
+    red_policy: Policy,
     seeds: list[int] | tuple[int, ...] = (101, 103),
     fraud_scenarios: list[str] | None = None,
     audio_renderer: AudioRenderer | None = None,
@@ -152,7 +170,6 @@ def evaluate_blue_policy(
     known = {item[0] for item in ATTACK_CARDS}
     if set(fraud_ids) - known:
         raise ValueError("held-out evaluation may use only configured synthetic attack cards")
-    active_red = red_policy or ScriptedPolicy(Team.RED)
     true_positive = false_positive = false_negative = 0
     legitimate_cases = legitimate_false_blocks = boundary_violations = 0
     valid_tool_calls = total_tool_calls = 0
@@ -161,7 +178,7 @@ def evaluate_blue_policy(
     for scenario_id in [*fraud_ids, *sorted(LEGITIMATE_CONTROL_SCENARIOS)]:
         for seed in seeds:
             rollout = run_policy_episode(
-                red_policy=active_red,
+                red_policy=red_policy,
                 blue_policy=blue_policy,
                 seed=seed,
                 scenario_id=scenario_id,
@@ -194,6 +211,7 @@ def evaluate_blue_policy(
         valid_tool_calls=valid_tool_calls,
         total_tool_calls=total_tool_calls,
         seed_set=list(seeds),
+        evaluated_fraud_scenarios=list(fraud_ids),
     )
     return HeldOutEvaluation(report=report, outcomes=outcomes)
 
@@ -211,7 +229,7 @@ def write_evaluation(output_path: str | Path, evaluation: HeldOutEvaluation) -> 
 def evaluate_red_policy(
     *,
     red_policy: Policy,
-    blue_policy: Policy | None = None,
+    blue_policy: Policy,
     seeds: list[int] | tuple[int, ...] = (101, 103),
     fraud_scenarios: list[str] | None = None,
     audio_renderer: AudioRenderer | None = None,
@@ -223,25 +241,24 @@ def evaluate_red_policy(
     known = {item[0] for item in ATTACK_CARDS}
     if set(scenario_ids) - known:
         raise ValueError("red evaluation may use only configured synthetic attack cards")
-    active_blue = blue_policy or ScriptedPolicy(Team.BLUE)
     compromises = invalid = total_calls = 0
     for scenario_id in scenario_ids:
         for seed in seeds:
             rollout = run_policy_episode(
                 red_policy=red_policy,
-                blue_policy=active_blue,
+                blue_policy=blue_policy,
                 seed=seed,
                 scenario_id=scenario_id,
                 audio_renderer=audio_renderer,
             )
-            compromises += int(rollout.verdict.terminal_outcome == "simulated_compromise")
+            compromises += int(rollout.verdict.terminal_outcome == "compromise")
             total_calls += len(rollout.state.ledger)
             invalid += sum(not event.valid for event in rollout.state.ledger)
     return AttackEvaluation(
         adapter_revision=adapter_revision,
         opponent_revision=opponent_revision,
         total_episodes=len(scenario_ids) * len(seeds),
-        simulated_compromises=compromises,
+        compromises=compromises,
         invalid_tool_calls=invalid,
         total_tool_calls=total_calls,
         seed_set=list(seeds),

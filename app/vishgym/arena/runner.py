@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from vishgym.arena.models import EpisodeState, JudgeResult, Team
 from vishgym.arena.world import VishGymEnv
-from vishgym.core.agents import ScriptedPolicy
+from vishgym.dev.policies import DeterministicTestPolicy
 
 
 def run_local_episode(
@@ -12,8 +12,8 @@ def run_local_episode(
 ) -> tuple[EpisodeState, JudgeResult]:
     env = VishGymEnv()
     observation = env.reset(seed=seed, scenario_id=scenario_id, difficulty=difficulty)
-    red = ScriptedPolicy(Team.RED)
-    blue = ScriptedPolicy(Team.BLUE)
+    red = DeterministicTestPolicy(Team.RED)
+    blue = DeterministicTestPolicy(Team.BLUE)
     while True:
         policy = red if observation.team is Team.RED else blue
         result = env.step(observation.team, policy.act(observation))

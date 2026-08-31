@@ -10,14 +10,15 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 import json
+import os
 from pathlib import Path
 import re
 import tempfile
-from typing import Any
+from typing import Any, Callable
 
 from vishgym.arena.audio import QwenCustomVoiceRenderer
 from vishgym.arena.models import AgentAction, AgentObservation, Persona, Team, ToolCall
-from vishgym.core.agents import GemmaPolicyHarness, ScriptedPolicy
+from vishgym.core.agents import GemmaPolicyHarness
 from vishgym.core.fixtures import ATTACK_CARDS
 from vishgym.core.prompting import policy_system_prompt, policy_user_content
 from vishgym.training.sft import BASE_MODEL_ID, WarmStartConfig, _load_qlora_model, training_preflight
@@ -28,8 +29,8 @@ class GroupRelativeConfig:
     role: Team
     initial_adapter_path: str
     output_dir: str
+    opponent_adapter_path: str
     model_id: str = BASE_MODEL_ID
-    opponent_adapter_path: str | None = None
     scenario_ids: tuple[str, ...] = ("vishing_collect", "smishing_link", "whatsapp_beneficiary")
     seed: int = 211
     updates: int = 3
@@ -71,14 +72,17 @@ def _messages(team: Team, persona: Persona, observation: AgentObservation, audio
         own_tools=observation.own_tools,
         audio_path=audio_path,
     )
-    return [{"role": "system", "content": policy_system_prompt(team, persona)}, {"role": "user", "content": content}]
+    return [
+        {"role": "system", "content": [{"type": "text", "text": policy_system_prompt(team, persona)}]},
+        {"role": "user", "content": content},
+    ]
 
 
 def _parse_action(raw: str, observation: AgentObservation) -> AgentAction:
     match = re.search(r"\{.*\}", raw, flags=re.DOTALL)
     if match is None:
         return AgentAction(
-            spoken_text="I could not form a valid synthetic action.",
+            spoken_text="I need a moment to clarify the next step.",
             tool_call=ToolCall(name="invalid.model_output", arguments={}),
         )
     try:
@@ -88,19 +92,32 @@ def _parse_action(raw: str, observation: AgentObservation) -> AgentAction:
         return AgentAction(spoken_text=payload["spoken_text"], tool_call=tool_call)
     except (KeyError, TypeError, ValueError, json.JSONDecodeError):
         return AgentAction(
-            spoken_text="I could not form a valid synthetic action.",
+            spoken_text="I need a moment to clarify the next step.",
             tool_call=ToolCall(name="invalid.model_output", arguments={}),
         )
 
 
 class _SamplingPolicy:
-    def __init__(self, *, team: Team, model: Any, processor: Any, audio_dir: Path, temperature: float, max_new_tokens: int):
+    def __init__(
+        self,
+        *,
+        team: Team,
+        model: Any,
+        processor: Any,
+        audio_dir: Path,
+        temperature: float,
+        max_new_tokens: int,
+        adapter_name: str = "default",
+        record_traces: bool = True,
+    ):
         self.team = team
         self.model = model
         self.processor = processor
         self.audio_dir = audio_dir
         self.temperature = temperature
         self.max_new_tokens = max_new_tokens
+        self.adapter_name = adapter_name
+        self.record_traces = record_traces
         self.persona: Persona | None = None
         self.traces: list[_TurnTrace] = []
 
@@ -122,9 +139,12 @@ class _SamplingPolicy:
             return_tensors="pt",
             add_generation_prompt=True,
             enable_thinking=False,
-        ).to(self.model.device)
+        ).to(self.model.device, dtype=torch.bfloat16)
         input_length = inputs["input_ids"].shape[-1]
         self.model.eval()
+        setter = getattr(self.model, "set_adapter", None)
+        if setter is not None:
+            setter(self.adapter_name)
         with torch.no_grad():
             output = self.model.generate(
                 **inputs,
@@ -134,15 +154,16 @@ class _SamplingPolicy:
                 top_p=0.95,
             )
         raw = self.processor.decode(output[0][input_length:], skip_special_tokens=True)
-        self.traces.append(_TurnTrace(messages=messages, completion=raw))
+        if self.record_traces:
+            self.traces.append(_TurnTrace(messages=messages, completion=raw))
         return _parse_action(raw, observation)
 
 
-def _completion_log_probability(model: Any, processor: Any, trace: _TurnTrace):
+def _completion_log_probability(model: Any, processor: Any, trace: _TurnTrace, *, adapter_name: str = "default"):
     """Mean token log-probability for one sampled JSON completion."""
     import torch
 
-    full_messages = [*trace.messages, {"role": "assistant", "content": trace.completion}]
+    full_messages = [*trace.messages, {"role": "assistant", "content": [{"type": "text", "text": trace.completion}]}]
     prompt = processor.apply_chat_template(
         trace.messages,
         tokenize=True,
@@ -150,7 +171,7 @@ def _completion_log_probability(model: Any, processor: Any, trace: _TurnTrace):
         return_tensors="pt",
         add_generation_prompt=True,
         enable_thinking=False,
-    ).to(model.device)
+    ).to(model.device, dtype=torch.bfloat16)
     full = processor.apply_chat_template(
         full_messages,
         tokenize=True,
@@ -158,13 +179,16 @@ def _completion_log_probability(model: Any, processor: Any, trace: _TurnTrace):
         return_tensors="pt",
         add_generation_prompt=False,
         enable_thinking=False,
-    ).to(model.device)
+    ).to(model.device, dtype=torch.bfloat16)
     prompt_length = prompt["input_ids"].shape[-1]
     ids = full["input_ids"]
     if ids.shape[-1] <= prompt_length or not torch.equal(ids[:, :prompt_length], prompt["input_ids"]):
         raise ValueError("Gemma chat template did not preserve the rollout audio prompt prefix")
     labels = ids.clone()
     labels[:, :prompt_length] = -100
+    setter = getattr(model, "set_adapter", None)
+    if setter is not None:
+        setter(adapter_name)
     logits = model(**full).logits[:, :-1, :]
     target = labels[:, 1:]
     mask = target.ne(-100)
@@ -175,20 +199,58 @@ def _completion_log_probability(model: Any, processor: Any, trace: _TurnTrace):
 
 
 def _opponent_policy(config: GroupRelativeConfig, team: Team, audio_dir: Path):
-    if config.opponent_adapter_path is None:
-        return ScriptedPolicy(team)
     opponent = GemmaPolicyHarness(team=team, adapter_path=config.opponent_adapter_path, model_id=config.model_id, audio_dir=audio_dir)
     opponent.load()
     return opponent
 
 
-def run_group_relative_round(config: GroupRelativeConfig) -> GroupRelativeResult:
+def _shared_opponent_policy(
+    *,
+    config: GroupRelativeConfig,
+    team: Team,
+    model: Any,
+    processor: Any,
+    audio_dir: Path,
+    adapter_name: str,
+) -> _SamplingPolicy:
+    loader = getattr(model, "load_adapter", None)
+    if loader is None:
+        raise RuntimeError("GRPO model does not support adapter swapping")
+    if adapter_name not in getattr(model, "peft_config", {}):
+        loader(config.opponent_adapter_path, adapter_name=adapter_name, is_trainable=False)
+    return _SamplingPolicy(
+        team=team,
+        model=model,
+        processor=processor,
+        audio_dir=audio_dir,
+        temperature=0.1,
+        max_new_tokens=config.max_new_tokens,
+        adapter_name=adapter_name,
+        record_traces=False,
+    )
+
+
+def _rollout_audio_renderer(audio_dir: Path):
+    if os.environ.get("VISHGYM_QWEN_RENDERER") == "modal_worker":
+        try:
+            from modal_vishgym import _RemoteQwenAudioRenderer
+        except ImportError as exc:
+            raise RuntimeError("Modal Qwen renderer bridge is unavailable") from exc
+        return _RemoteQwenAudioRenderer(output_dir=audio_dir)
+    renderer = QwenCustomVoiceRenderer(output_dir=audio_dir)
+    renderer.load()
+    return renderer
+
+
+def run_group_relative_round(
+    config: GroupRelativeConfig,
+    metrics_callback: Callable[[dict[str, Any]], None] | None = None,
+) -> GroupRelativeResult:
     """Run a small online, no-upload GRPO-style LoRA round in the closed arena.
 
     Groups share a scenario/seed and are normalized by terminal reward. A zero-KL
     objective is intentional for this compact first round; every reward still comes
-    from the fixed sandbox judge. Historical adapters can be supplied as frozen
-    opponents, while the initial experiment may use the reviewed scripted policy.
+    from the fixed sandbox judge. The opponent is always a frozen adapter.
     """
     try:
         import torch
@@ -205,6 +267,18 @@ def run_group_relative_round(config: GroupRelativeConfig) -> GroupRelativeResult
         raise ValueError("GRPO scenarios must be configured synthetic attack cards")
     if not Path(config.initial_adapter_path).is_dir():
         raise ValueError("initial_adapter_path must point to a reviewed local warm-start adapter")
+    if not config.opponent_adapter_path or not Path(config.opponent_adapter_path).is_dir():
+        raise ValueError("opponent_adapter_path must point to a reviewed local adapter")
+    if metrics_callback is not None:
+        metrics_callback(
+            {
+                "event": "preflight",
+                "role": config.role.value,
+                "updates": config.updates,
+                "group_size": config.group_size,
+                "learning_rate": config.learning_rate,
+            }
+        )
     training_preflight()
     torch.manual_seed(config.seed)
     model, processor = _load_qlora_model(
@@ -219,6 +293,9 @@ def run_group_relative_round(config: GroupRelativeConfig) -> GroupRelativeResult
             initial_adapter_path=config.initial_adapter_path,
         )
     )
+    train_adapter_name = "default"
+    opponent_team = Team.BLUE if config.role is Team.RED else Team.RED
+    opponent_adapter_name = f"frozen_{opponent_team.value}"
     optimizer = torch.optim.AdamW((parameter for parameter in model.parameters() if parameter.requires_grad), lr=config.learning_rate)
     output_dir = Path(config.output_dir).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -230,12 +307,35 @@ def run_group_relative_round(config: GroupRelativeConfig) -> GroupRelativeResult
     # traces, satisfying the ephemeral synthetic-data policy.
     with tempfile.TemporaryDirectory(prefix="vishgym-grpo-audio-") as temporary:
         audio_dir = Path(temporary)
-        renderer = QwenCustomVoiceRenderer(output_dir=audio_dir)
-        renderer.load()
-        opponent_team = Team.BLUE if config.role is Team.RED else Team.RED
-        opponent = _opponent_policy(config, opponent_team, audio_dir)
+        renderer = _rollout_audio_renderer(audio_dir)
+        opponent = _shared_opponent_policy(
+            config=config,
+            team=opponent_team,
+            model=model,
+            processor=processor,
+            audio_dir=audio_dir,
+            adapter_name=opponent_adapter_name,
+        )
+        if metrics_callback is not None:
+            metrics_callback(
+                {
+                    "event": "ready",
+                    "role": config.role.value,
+                    "opponent": opponent_team.value,
+                    "learning_rate": optimizer.param_groups[0]["lr"],
+                }
+            )
         for update in range(config.updates):
             scenario_id = config.scenario_ids[update % len(config.scenario_ids)]
+            if metrics_callback is not None:
+                metrics_callback(
+                    {
+                        "event": "update_started",
+                        "update": update + 1,
+                        "updates": config.updates,
+                        "scenario": scenario_id,
+                    }
+                )
             group: list[tuple[_SamplingPolicy, float]] = []
             for sample_index in range(config.group_size):
                 actor = _SamplingPolicy(
@@ -245,11 +345,27 @@ def run_group_relative_round(config: GroupRelativeConfig) -> GroupRelativeResult
                     audio_dir=audio_dir,
                     temperature=config.temperature,
                     max_new_tokens=config.max_new_tokens,
+                    adapter_name=train_adapter_name,
                 )
                 # GRPO compares sampled completions for the same environment setup.
                 # Stochastic generation, rather than a changed persona/tool state,
                 # supplies the within-group variation.
                 seed = config.seed + update
+                def emit_episode_turn(payload: dict[str, Any], *, sample: int = sample_index) -> None:
+                    if metrics_callback is None:
+                        return
+                    metrics_callback(
+                        {
+                            **payload,
+                            "event": "training_episode_turn",
+                            "update": update + 1,
+                            "updates": config.updates,
+                            "sample_index": sample + 1,
+                            "group_size": config.group_size,
+                            "trained_role": config.role.value,
+                        }
+                    )
+
                 if config.role is Team.RED:
                     from vishgym.training.rollouts import run_policy_episode
 
@@ -259,6 +375,7 @@ def run_group_relative_round(config: GroupRelativeConfig) -> GroupRelativeResult
                         seed=seed,
                         scenario_id=scenario_id,
                         audio_renderer=renderer,
+                        step_callback=emit_episode_turn,
                     )
                     reward = rollout.verdict.red_reward
                 else:
@@ -270,6 +387,7 @@ def run_group_relative_round(config: GroupRelativeConfig) -> GroupRelativeResult
                         seed=seed,
                         scenario_id=scenario_id,
                         audio_renderer=renderer,
+                        step_callback=emit_episode_turn,
                     )
                     reward = rollout.verdict.blue_reward
                 for trace in actor.traces:
@@ -280,10 +398,20 @@ def run_group_relative_round(config: GroupRelativeConfig) -> GroupRelativeResult
             advantages = (values - values.mean()) / values.std(unbiased=False).clamp_min(1e-6)
             weighted_losses = []
             model.train()
+            setter = getattr(model, "set_adapter", None)
+            if setter is not None:
+                setter(train_adapter_name)
             for (actor, _), advantage in zip(group, advantages, strict=True):
                 for trace in actor.traces:
                     trace.advantage = float(advantage.item())
-                    weighted_losses.append(-advantage * _completion_log_probability(model, processor, trace))
+                    weighted_losses.append(
+                        -advantage * _completion_log_probability(
+                            model,
+                            processor,
+                            trace,
+                            adapter_name=train_adapter_name,
+                        )
+                    )
             if not weighted_losses:
                 continue
             loss = torch.stack(weighted_losses).mean()
@@ -291,7 +419,22 @@ def run_group_relative_round(config: GroupRelativeConfig) -> GroupRelativeResult
             loss.backward()
             torch.nn.utils.clip_grad_norm_((parameter for parameter in model.parameters() if parameter.requires_grad), 1.0)
             optimizer.step()
-            losses.append(float(loss.detach().cpu()))
+            loss_value = float(loss.detach().cpu())
+            losses.append(loss_value)
+            if metrics_callback is not None:
+                group_rewards = [reward for _, reward in group]
+                metrics_callback(
+                    {
+                        "event": "update_completed",
+                        "update": update + 1,
+                        "updates": config.updates,
+                        "scenario": scenario_id,
+                        "reward": round(sum(group_rewards) / len(group_rewards), 6) if group_rewards else 0.0,
+                        "loss": round(loss_value, 6),
+                        "learning_rate": optimizer.param_groups[0]["lr"],
+                        "samples": len(group_rewards),
+                    }
+                )
 
     adapter_path = output_dir / "adapter"
     model.save_pretrained(adapter_path)
@@ -301,7 +444,7 @@ def run_group_relative_round(config: GroupRelativeConfig) -> GroupRelativeResult
         "role": config.role.value,
         "base_model": config.model_id,
         "initial_adapter_path": str(Path(config.initial_adapter_path).resolve()),
-        "opponent_adapter_path": str(Path(config.opponent_adapter_path).resolve()) if config.opponent_adapter_path else "scripted-reviewed-baseline",
+        "opponent_adapter_path": str(Path(config.opponent_adapter_path).resolve()),
         "config": {**asdict(config), "role": config.role.value, "scenario_ids": list(config.scenario_ids)},
         "updates_completed": len(losses),
         "mean_terminal_reward": round(sum(rewards) / len(rewards), 6) if rewards else 0.0,
@@ -313,6 +456,17 @@ def run_group_relative_round(config: GroupRelativeConfig) -> GroupRelativeResult
     }
     receipt_path = output_dir / "receipt.json"
     receipt_path.write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    if metrics_callback is not None:
+        metrics_callback(
+            {
+                "event": "completed",
+                "updates_completed": len(losses),
+                "mean_reward": float(receipt["mean_terminal_reward"]),
+                "mean_loss": float(receipt["mean_policy_loss"]),
+                "adapter_path": str(adapter_path),
+                "receipt_path": str(receipt_path),
+            }
+        )
     return GroupRelativeResult(
         adapter_path=adapter_path,
         receipt_path=receipt_path,

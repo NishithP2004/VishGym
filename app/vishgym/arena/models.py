@@ -87,7 +87,7 @@ class AudioTurn(BaseModel):
     language: Literal["English"] = "English"
     synthetic: bool = True
     transcript_hidden: bool = True
-    tts_model_revision: str = "synthetic-fallback-v1"
+    tts_model_revision: str = "developer-tone-v1"
     generation_settings: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -138,7 +138,7 @@ class JudgeResult(BaseModel):
     blue_reward: float
     labels: list[str]
     rationale: str
-    terminal_outcome: Literal["safe_defense", "simulated_compromise", "false_block", "inconclusive"]
+    terminal_outcome: Literal["safe_defense", "compromise", "false_block", "inconclusive"]
 
 
 class StepResult(BaseModel):

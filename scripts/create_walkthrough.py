@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from docx import Document
@@ -13,6 +14,7 @@ from docx.shared import Inches, Pt, RGBColor
 
 
 OUT = Path("docs/VishGym_Solution_Walkthrough.docx")
+BENCHMARK = Path("artifacts/benchmarks/adapter-smoke-v7/benchmark.json")
 BLUE = "2E74B5"
 DARK_BLUE = "1F4D78"
 NAVY = "0B2545"
@@ -173,7 +175,7 @@ def build() -> None:
     set_paragraph(p, after=16)
     set_run_font(p.add_run("Multimodal Red/Blue Self-Play Arena for Payment-Fraud Defense"), 14, MUTED)
 
-    add_table(doc, ["Prepared for", "Prototype focus", "Status"], [["Mastercard Innovation Challenge 2026", "Closed-loop AI defense lab for synthetic UPI social-engineering simulations", "Runnable local scaffold; GPU training integration ready"]], [2160, 5040, 2160])
+    add_table(doc, ["Prepared for", "Prototype focus", "Status"], [["Mastercard Innovation Challenge 2026", "Closed-loop AI defense lab for synthetic UPI social-engineering simulations", "Runnable prototype; measured Modal benchmark included"]], [2160, 5040, 2160])
 
     add_heading(doc, "1. Executive summary")
     add_body(doc, "VishGym is a closed, synthetic training arena that lets a Red agent and a Blue agent learn from each other without exposing real people or infrastructure to risk. The Red agent initiates fictional payment-fraud scenarios; the Blue agent uses only virtual tools to verify, refuse, report, or escalate. A fixed hybrid judge scores the complete episode and supplies delayed reward for alternating policy improvement.")
@@ -187,10 +189,10 @@ def build() -> None:
     ], [2340, 7020])
 
     add_heading(doc, "3. Closed synthetic architecture")
-    add_body(doc, "The environment implements OpenEnv-style reset, step, and state semantics. Each episode creates new fictional personas, pseudo-identifiers, a virtual INR wallet, synthetic inbox records, sandbox-only pages, fixed search results, audio turns, and an immutable tool ledger.")
+    add_body(doc, "The environment implements OpenEnv-style reset, step, and state semantics. Each episode creates new fictional personas, pseudo-identifiers, a virtual INR wallet, synthetic inbox records, sandbox-only pages, fixed search results, audio turns, and an immutable tool ledger. The web prototype defaults to a fresh random seed, persona pair, pseudo-identity packet, built-in voice, and tone profile for every live call; fixed seeds remain available for reproducible evaluation.")
     add_bullets(doc, [
         "Red and Blue use separate QLoRA adapters over a shared Gemma 4 E2B multimodal base model.",
-        "Conversation is audio-only for the opponent. The hidden transcript is retained solely for audit and the reward judge.",
+        "Conversation is audio-only for the opponent. The prototype displays the actual synthetic message spoken by either agent for judge review, but the agents themselves never receive a text transcript.",
         "Qwen3-TTS CustomVoice renders English turns using built-in, non-identifiable speakers and style instructions. The public runtime accepts no reference audio.",
         "The fixed judge combines deterministic ledger rules with a bounded contextual review, preventing reward drift or unreviewed judge training.",
     ])
@@ -208,14 +210,14 @@ def build() -> None:
         "Synthetic SMS payment-link impersonation in a sandbox-only browser flow.",
         "Synthetic WhatsApp beneficiary or invoice-change impersonation.",
     ])
-    add_body(doc, "Six additional catalogue cards support breadth without claiming unimplemented live flows. All scenario language, identifiers, and pages are fictional and labelled as simulation content.")
+    add_body(doc, " Six additional catalogue cards support breadth without claiming unimplemented live flows. All scenario language, identifiers, and pages are fictional and labelled as simulation content.")
 
     add_heading(doc, "6. Rewards and learning loop")
-    add_body(doc, "Rewards are delayed until the terminal episode. Deterministic rules govern virtual payment, pseudo-credential exposure, reporting, blocking, and invalid actions. The judge provides only a small contextual adjustment. Blue is rewarded for correct safe behavior and penalized for unsafe virtual actions or unnecessary blocks. Red receives simulated reward only for sandbox-contained outcomes and loses reward for invalid or boundary-violating actions.")
+    add_body(doc, "Rewards are delayed until the terminal episode. Deterministic rules govern virtual payment, pseudo-credential exposure, reporting, blocking, and invalid actions. The judge provides only a small contextual adjustment. Blue is rewarded for correct safe behavior and penalized for unsafe virtual actions, unnecessary blocks, and unnecessary declines on legitimate controls; this prevents a degenerate block-everything policy. Red receives simulated reward only for sandbox-contained outcomes and loses reward for invalid or boundary-violating actions.")
     add_bullets(doc, [
         "Warm start: synthetic tool-use traces validate schemas and sandbox behavior.",
         "Red update: QLoRA/GRPO against frozen Blue, gated by held-out scenarios and historical Blue checkpoints.",
-        "Blue update: QLoRA/GRPO against reviewed Red, gated by F1 >= 0.80 and legitimate false-block rate <= 10%.",
+        "Blue update: QLoRA/GRPO against reviewed Red, gated by all nine fraud cards, at least two held-out seeds, F1 >= 0.80, legitimate false-block rate <= 10%, valid tool-call rate >= 98%, and zero boundary violations.",
         "Release: human review of metrics, seeds, data revision, and model manifest; no automatic promotion.",
     ])
 
@@ -224,23 +226,39 @@ def build() -> None:
     add_body(doc, "Google Colab MCP is the intended training operator surface. The accompanying notebook pulls the repository, validates a deterministic local rollout, and records the required alternating-QloRA/GRPO workflow. Candidate adapters, synthetic datasets, metrics, seeds, and reviewer decisions are versioned as artifacts before promotion.")
     add_body(doc, "The prototype deploys as a Hugging Face GPU Docker Space: Streamlit provides the judge-facing UI, FastAPI exposes the simulator and model manifest, and Nginx routes both through port 7860. Runtime audio and simulation data are held in memory or ephemeral storage and expire after 60 minutes.")
 
-    add_heading(doc, "8. Evaluation plan")
+    add_heading(doc, "8. Measured Modal benchmark")
+    benchmark = json.loads(BENCHMARK.read_text(encoding="utf-8"))
+    blue = benchmark["blue"]["report"]
+    red = benchmark["red"]
+    protocol = benchmark["protocol"]
+    add_body(doc, "A completed Modal L4 benchmark evaluated two 2-step QLoRA validation adapters against each other using generated Qwen3-TTS CustomVoice audio. It covers all nine synthetic fraud cards plus one legitimate control at held-out seed 101. The system used audio-only opponent input, deterministic generation (temperature 0), and a 96-token action cap. The report stores aggregate metrics only; no raw audio, transcript, or model completion was persisted.")
+    add_table(doc, ["Metric", "Observed result", "Interpretation"], [
+        ["Blue fraud-decision F1", f"{blue['fraud_decision_f1']:.4f} (9/9 fraud cases safely defended)", "Strong fraud-card coverage in this one-seed validation run."],
+        ["Legitimate false-block rate", f"{blue['legitimate_false_block_rate']:.0%} (1/1 control blocked)", "Fails the <=10% gate; adapter is not eligible for promotion."],
+        ["Blue valid tool-call rate", f"{blue['valid_tool_call_rate']:.0%} ({blue['valid_tool_calls']}/{blue['total_tool_calls']})", "No malformed or boundary-violating tool action was observed."],
+        ["Red simulated attack success", f"{red['simulated_attack_success_rate']:.0%} ({red['simulated_compromises']}/{red['total_episodes']})", "The validation attacker did not obtain a simulated compromise."],
+        ["Red valid tool-call rate", f"{red['valid_tool_call_rate']:.0%} ({red['total_tool_calls']} calls)", "All attacker tool use remained inside the sandbox."],
+    ], [2160, 2700, 4680])
+    add_body(doc, "This is a reproducible pipeline benchmark, not a deployment-efficacy claim: it uses one held-out seed and undertrained adapters. The red/blue review manifests remain review_required. The next gate is a larger, multi-seed run (101 and 103), all nine fraud cards, held-out personas/timbres, legitimate controls, and human review; only then can the planned F1, false-block, validity, and boundary thresholds be assessed.")
+
+    add_heading(doc, "9. Evaluation plan")
     add_bullets(doc, [
         "Hold out persona pairs, built-in timbres, scenario combinations, temperature values, noise, and latency settings.",
         "Report Blue fraud-decision F1, legitimate false-block rate, simulated compromise rate, valid tool-call rate, and gains over the initial Blue adapter.",
         "Compare promoted Blue versions against frozen historical Red checkpoints to detect overfitting to a single attacker policy.",
+        "Reject narrow runs before review unless they cover all nine fraud attack cards across at least two held-out seeds.",
         "Run integration checks for invalid tool calls, non-sandbox URL attempts, inference timeouts, audio failures, and expired simulation records.",
     ])
 
-    add_heading(doc, "9. Real-world feasibility and safeguards")
+    add_heading(doc, "10. Real-world feasibility and safeguards")
     add_body(doc, "VishGym is a training and evaluation environment, not a customer-facing fraud engine. In a production payment system, the Blue policy would become one risk signal alongside transaction controls, verified device and account signals, customer confirmation, and human escalation. It does not authorize or block real payments on its own.")
     add_body(doc, "The project deliberately forbids real-person voice retrieval, voice uploads, real identifiers, external browsing, live mailboxes, real payment rails, exposed portals, and automatic adapter publication. These constraints make the prototype suitable for defensive research while preserving a realistic closed-loop learning objective.")
 
-    add_heading(doc, "10. Submission artifacts")
+    add_heading(doc, "11. Submission artifacts")
     add_bullets(doc, [
         "Runnable GitHub repository with environment, simulated tools, API, Streamlit UI, Docker deployment configuration, and unit tests.",
         "Colab notebook for reviewed training runs through the Google Colab MCP bridge.",
-        "Hosted Hugging Face Docker Space using approved GPU access and private deployment secrets.",
+        "Hugging Face Docker Space configuration ready for deployment; no public hosted Space is claimed until it is deployed and reviewed.",
     ])
 
     doc.core_properties.title = "VishGym Solution Walkthrough"

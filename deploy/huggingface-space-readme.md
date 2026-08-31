@@ -10,4 +10,4 @@ suggested_hardware: l4x1
 
 # VishGym Space
 
-Closed synthetic red/blue self-play demonstration. Add this header to the Hugging Face Space `README.md`, configure the Space for GPU hardware, and store any model-access tokens as Space secrets. Do not add write tokens to the public UI.
+Audio-native red/blue payment-risk arena. Configure the Space for GPU hardware, set reviewed adapter repositories as secrets or environment variables, and store model-access tokens as Space secrets. Do not add write tokens to the public UI.
